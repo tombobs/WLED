@@ -11,7 +11,7 @@ private:
     static constexpr uint32_t refreshRate = 50; // per second
     static constexpr uint32_t refreshDelay = 1000 / refreshRate;
 
-    struct Segment {
+    struct Segment60 {
         // config
         int16_t firstLed  = 0;
         int16_t lastLed   = 59;
@@ -20,7 +20,7 @@ private:
         // runtime
         int16_t size;
 
-        Segment() {
+        Segment60 () {
             update();
         }
 
@@ -41,18 +41,55 @@ private:
         }
     };
 
+    struct Segment24 {
+        // config
+        int16_t firstLed  = 60;
+        int16_t lastLed   = 83;
+        int16_t centerLed = 60;
+    
+
+        // runtime
+        int16_t size;
+
+        Segment24 () {
+            update();
+        }
+
+        void validateAndUpdate() {
+            if (firstLed < 0 || firstLed >= strip.getLengthTotal() ||
+                    lastLed < firstLed || lastLed >= strip.getLengthTotal()) {
+                *this = {};
+                return;
+            }
+            if (centerLed < firstLed || centerLed > lastLed) {
+                centerLed = firstLed;
+            }
+            update();
+        }
+
+        void update() {
+            size = lastLed - firstLed + 1;
+        }
+    };
+
+    union BaseSegment {
+        Segment60 segment60;
+        Segment24 segment24;
+    };
+
     // configuration (available in API and stored in flash)
-    bool     enabled          = false;
-    Segment  mainSegment;
+    bool     enabled          = true;
+    Segment60  mainSegment;
     bool     hourMarksEnabled = true;
     uint32_t hourMarkColor    = 0xFF0000;
     uint32_t hourColor        = 0x0000FF;
     uint32_t minuteColor      = 0x00FF00;
     bool     secondsEnabled   = true;
-    Segment  secondsSegment;
-    uint32_t secondColor      = 0xFF0000;
-    bool     blendColors      = true;
+    Segment60  secondsSegment;
+    uint32_t secondColor      = 0x000000;
+    bool     blendColors      = false;
     uint16_t secondsEffect    = 0;
+    Segment24  hourSegment;
 
     // runtime
     bool     initDone         = false;
@@ -61,12 +98,20 @@ private:
     void validateAndUpdate() {
         mainSegment.validateAndUpdate();
         secondsSegment.validateAndUpdate();
+        hourSegment.validateAndUpdate();
         if (secondsEffect < 0 || secondsEffect > 1) {
             secondsEffect = 0;
         }
     }
 
-    int16_t adjustToSegment(double progress, Segment const& segment) {
+    int16_t adjustToSegment(double progress, Segment60 const& segment) {
+        int16_t led = segment.centerLed + progress * segment.size;
+        return led > segment.lastLed
+                ? segment.firstLed + led - segment.lastLed - 1
+                : led;
+    }
+
+    int16_t adjustToSegment24(double progress, Segment24 const& segment) {
         int16_t led = segment.centerLed + progress * segment.size;
         return led > segment.lastLed
                 ? segment.firstLed + led - segment.lastLed - 1
@@ -79,6 +124,7 @@ private:
         } else {
             uint32_t oldC = strip.getPixelColor(n);
             strip.setPixelColor(n, qadd32(oldC, c));
+            strip.setBrightness(255);
         }
     }
 
@@ -100,12 +146,15 @@ private:
         }
     }
 
-    void secondsEffectSineFade(int16_t secondLed, Toki::Time const& time) {
+    void fadeIn(int16_t secondLed, Toki::Time const& time, Segment60 segment, uint32_t color, bool trail = false) {
         uint32_t ms = time.ms % 1000;
         uint8_t b0 = (cos8(ms * 64 / 1000) - 128) * 2;
-        setPixelColor(secondLed, gamma32(scale32(secondColor, b0)));
+        setPixelColor(secondLed, gamma32(scale32(color, b0)));
         uint8_t b1 = (sin8(ms * 64 / 1000) - 128) * 2;
-        setPixelColor(inc(secondLed, 1, secondsSegment), gamma32(scale32(secondColor, b1)));
+
+        if (trail) {
+            setPixelColor(inc(secondLed, 1, segment), gamma32(scale32(color, b1)));
+        }
     }
 
     static inline uint32_t qadd32(uint32_t c1, uint32_t c2) {
@@ -126,13 +175,13 @@ private:
         );
     }
 
-    static inline int16_t dec(int16_t n, int16_t i, Segment const& seg) {
+    static inline int16_t dec(int16_t n, int16_t i, Segment60 const& seg) {
         return n - seg.firstLed >= i
                 ? n - i
                 : seg.lastLed - seg.firstLed - i + n + 1;
     }
 
-    static inline int16_t inc(int16_t n, int16_t i, Segment const& seg) {
+    static inline int16_t inc(int16_t n, int16_t i, Segment60 const& seg) {
         int16_t r = n + i;
         if (r > seg.lastLed) {
             return seg.firstLed + n - seg.lastLed;
@@ -167,13 +216,25 @@ public:
         double minuteP = minute(localTime) / 60.0;
         double hourP = (hour(localTime) % 12) / 12.0 + minuteP / 12.0;
 
+        int16_t secondLed = adjustToSegment(secondP, secondsSegment);
+
         if (hourMarksEnabled)         {
             for (int Led = 0; Led <= 55; Led = Led + 5)
             {
                 int16_t hourmarkled = adjustToSegment(Led / 60.0, mainSegment);
-                setPixelColor(hourmarkled, hourMarkColor);
+                if (secondLed != hourmarkled) {                
+                    // fadeIn(hourmarkled, time, mainSegment, hourMarkColor);        
+                    setPixelColor(hourmarkled, hourMarkColor);   
+                }
             }
         }
+
+        setPixelColor(adjustToSegment(minuteP, mainSegment), minuteColor);
+
+        int hourLed = adjustToSegment24(hourP, hourSegment);
+        setPixelColor(hourLed, hourColor);
+        bool isAfter30 = minuteP >= 0.5;
+        setPixelColor(hourLed + (isAfter30 ? -1 : 1), hourColor);
 
         if (secondsEnabled) {
             int16_t secondLed = adjustToSegment(secondP, secondsSegment);
@@ -184,20 +245,12 @@ public:
                     break;
 
                 case 1: // fading seconds
-                    secondsEffectSineFade(secondLed, time);
+                    fadeIn(secondLed, time, secondsSegment, secondColor, true);
                     break;
             }
-
-            // TODO: move to secondsTrailEffect
-            // for (uint16_t i = 1; i < secondsTrail + 1; ++i) {
-            //     uint16_t trailLed = dec(secondLed, i, secondsSegment);
-            //     uint8_t trailBright = 255 / (secondsTrail + 1) * (secondsTrail - i + 1);
-            //     setPixelColor(trailLed, gamma32(scale32(secondColor, trailBright)));
-            // }
         }
 
-        setPixelColor(adjustToSegment(minuteP, mainSegment), minuteColor);
-        setPixelColor(adjustToSegment(hourP, mainSegment), hourColor);
+        
     }
 
     void addToConfig(JsonObject& root) override {
